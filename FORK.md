@@ -42,4 +42,4 @@ The automated tests cover ownership contention and transfer, standby execution/h
 4. Apply original Malice presets through narrowly scoped UI automation, with reference comparison; do not claim static parameter copies reproduce easing.
 5. Separately prove native transcription via an available UXP bridge and timed spoken fixture before implementing a workflow.
 
-Keep changes focused and upstream merges reviewable. No changes to Malice files, production projects, or MCP installation are part of this development branch.
+Keep changes focused and upstream merges reviewable. No changes to Malice files or production projects are part of this branch. Local installation was subsequently authorized; see VALIDATION.md.

@@ -1,4 +1,4 @@
-> **Akhil’s development fork:** background startup is under development on `feat/background-bridge`. See [FORK.md](FORK.md) for scope, validation, and rollout. The installed upstream build has not been replaced.
+> **Akhil’s development fork:** background startup is under development on `feat/background-bridge`. See [FORK.md](FORK.md) for scope, validation, and rollout. This development branch requires live Premiere acceptance testing.
 
 <div align="center">
 

@@ -40,6 +40,11 @@ const NOT_SCRIPT_BUILDERS = new Set([
   'constructor', 'initialize', 'cleanup', 'executeScript', 'waitForResponse',
   'detectPremiereProInstallation', 'initializeCommunication', 'isConnected',
   'getTempDir', 'runDiagnostics',
+  // Host readiness/discovery are transport lifecycle, not script builders.
+  // Enumerating them here can launch Premiere and wait on real heartbeat files.
+  'setupTempDirectory', 'findPremiereLaunchPath', 'ensureHost',
+  'isPremiereProcessRunning', 'waitForStartedHeartbeat', 'readHeartbeat',
+  'findInstalledMediaEncoder',
 ]);
 
 function payloadRuns(script: string): boolean {

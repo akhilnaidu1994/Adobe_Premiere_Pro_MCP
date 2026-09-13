@@ -427,6 +427,7 @@
     }
 
     function MCPPremiereBridge() {
+        this.packageVersion = readInstalledPackageVersion();
         this.owner = new window.BridgeOwner(require('net'));
         this.isConnected = false;
         this.tempDirectory = '';
@@ -736,7 +737,9 @@
             if (!tempPath) return;
             fs.writeFileSync(path.join(tempPath, 'bridge-heartbeat.json'), JSON.stringify({
                 t: Date.now(),
-                started: !!this.isConnected
+                started: !!this.isConnected,
+                version: this.packageVersion || 'unknown',
+                context: this.csInterface && this.csInterface.getExtensionID ? this.csInterface.getExtensionID() : 'unknown'
             }));
         } catch (e) {}
     };
