@@ -96,6 +96,7 @@ export function loadPanel(): LoadedPanel {
 
   // Prototype only: running the constructor would start timers and touch disk.
   const bridge = Object.create((Bridge as unknown as { prototype: object }).prototype) as Record<string, any>;
+  bridge.owner = { owned: true, acquire: jest.fn(), release: jest.fn() };
   bridge.csInterface = new (sandbox.CSInterface as new () => unknown)();
   bridge.normalizeHostEnvironment = (value: unknown) => value;
   bridge.log = () => {};

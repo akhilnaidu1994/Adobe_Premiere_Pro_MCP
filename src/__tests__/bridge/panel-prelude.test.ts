@@ -216,10 +216,12 @@ describe('the panel copy of the prelude', () => {
     expect(typeof Bridge).toBe('function');
 
     const bridge = Object.create((Bridge as unknown as { prototype: object }).prototype) as {
+      owner: { owned: boolean };
       csInterface: unknown;
       normalizeHostEnvironment: (v: unknown) => unknown;
       executeExtendScript: (s: string, cb: (e: unknown, r?: unknown) => void) => void;
     };
+    bridge.owner = { owned: true };
     bridge.csInterface = new (sandbox.CSInterface as new () => never)();
     bridge.normalizeHostEnvironment = (value: unknown) => value;
     bridge.executeExtendScript('return 1;', () => {});

@@ -19,3 +19,8 @@ release-artifacts/
 
 # Cloudflare
 .wrangler/
+
+# macOS AppleDouble files on external volumes
+._*
+# Also ignore a local dependency symlink
+node_modules

@@ -427,6 +427,7 @@
     }
 
     function MCPPremiereBridge() {
+        this.owner = new window.BridgeOwner(require('net'));
         this.isConnected = false;
         this.tempDirectory = '';
         this.commandQueue = [];
@@ -462,7 +463,7 @@
         this.loadConfig();
         this.updateUI();
         this.startCommandPolling();
-        this.startBridge();
+        this.startBridge(false);
         this.checkForPackageUpdate();
     };
 
@@ -604,6 +605,10 @@
     };
 
     MCPPremiereBridge.prototype.executeExtendScript = function(script, callback, requestedTimeoutMs) {
+        if (!this.owner || !this.owner.owned || (!this.evalScriptBusy && fs.existsSync(this.inFlightPath()))) {
+            callback(new Error('This context does not own the bridge, or a previous native call has an unknown outcome. Inspect bridge status before retrying.'));
+            return;
+        }
         this.ensureEvalScriptQueue();
         this.evalScriptQueue.push({
             script: script,
@@ -618,6 +623,11 @@
         var callback = job.callback;
         var requestedTimeoutMs = job.requestedTimeoutMs;
         try {
+            if (fs.existsSync(this.inFlightPath())) {
+                callback(new Error('Previous native call has an unknown outcome; queued work is blocked.'));
+                this.releaseEvalScript();
+                return;
+            }
             if (!this.csInterface) {
                 callback(new Error('CSInterface not initialized'));
                 this.releaseEvalScript();
@@ -652,6 +662,7 @@
             function releaseAfterNative() {
                 if (nativeSettled) return;
                 nativeSettled = true;
+                try { fs.unlinkSync(self.inFlightPath()); } catch (e) {}
                 self.releaseEvalScript();
             }
 
@@ -665,6 +676,9 @@
                 // restarts (GitHub issue 86).
             }, timeoutMs);
 
+            // Leave this marker behind if a renderer dies during a native call.
+            // A replacement owner must not replay an operation with unknown outcome.
+            fs.writeFileSync(this.inFlightPath(), JSON.stringify({ startedAt: Date.now() }));
             this.csInterface.evalScript(fullScript, function(result) {
                 clearTimeout(timeoutId);
                 // Defer result handling and lock release off the evalScript stack so
@@ -692,6 +706,7 @@
                 }, 0);
             });
         } catch (e) {
+            if (typeof timeoutId !== 'undefined') clearTimeout(timeoutId);
             callback(e);
             this.releaseEvalScript();
         }
@@ -715,6 +730,7 @@
     };
 
     MCPPremiereBridge.prototype.writeHeartbeat = function() {
+        if (!this.owner || !this.owner.owned) return;
         try {
             var tempPath = this.getTempDirectory();
             if (!tempPath) return;
@@ -725,15 +741,66 @@
         } catch (e) {}
     };
 
+    MCPPremiereBridge.prototype.controlPath = function() {
+        // Shared across the visible and background contexts, even after changing
+        // the transport directory. Start/Stop controls both contexts.
+        return path.join(path.dirname(getPanelConfigPath()), 'bridge-control.json');
+    };
+
+    MCPPremiereBridge.prototype.inFlightPath = function() {
+        return path.join(path.dirname(getPanelConfigPath()), 'bridge-native-inflight.json');
+    };
+
+    MCPPremiereBridge.prototype.setEnabled = function(enabled) {
+        var destination = this.controlPath();
+        fs.writeFileSync(destination, JSON.stringify({ enabled: enabled }));
+    };
+
+    MCPPremiereBridge.prototype.pollBridge = function() {
+        var enabled = true;
+        try {
+            var control = this.controlPath();
+            if (fs.existsSync(control)) enabled = JSON.parse(fs.readFileSync(control, 'utf8')).enabled === true;
+        } catch (e) { enabled = false; } // Never execute through a partial control write.
+        if (!enabled) {
+            this.isConnected = false;
+            // A paused native call still owns the mutex until its callback arrives.
+            if (!this.isProcessing && !this.evalScriptBusy) {
+                this.writeHeartbeat();
+                this.owner.release();
+            }
+            this.updateUI();
+            return;
+        }
+        this.owner.acquire();
+        this.isConnected = this.owner.owned;
+        this.updateUI();
+        if (!this.isConnected) return;
+        if (!this.evalScriptBusy && fs.existsSync(this.inFlightPath())) {
+            this.isConnected = false;
+            this.writeHeartbeat();
+            this.updateUI();
+            if (!this.reportedUncertainCall) {
+                this.log('A previous native call has an unknown outcome. Stop and inspect Premiere before recovery; commands will not be replayed.', 'error');
+                this.reportedUncertainCall = true;
+            }
+            return;
+        }
+        // The other context may have saved a new transport path while paused.
+        var saved = readExistingPanelConfig();
+        if (saved.tempDirectory && !this.isProcessing && !this.evalScriptBusy) {
+            this.tempDirectory = sanitizeTempDirectoryInput(saved.tempDirectory);
+        }
+        this.writeHeartbeat();
+        if (!this.isProcessing && !this.evalScriptBusy) {
+            var tempPath = this.getTempDirectory();
+            if (tempPath) this.watchDirectory(tempPath);
+        }
+    };
+
     MCPPremiereBridge.prototype.startCommandPolling = function() {
         var self = this;
-        setInterval(function() {
-            self.writeHeartbeat();
-            if (!self.isProcessing && !self.evalScriptBusy && self.isConnected) {
-                var tempPath = self.getTempDirectory();
-                if (tempPath) self.watchDirectory(tempPath);
-            }
-        }, 250);
+        this.pollTimer = setInterval(function() { self.pollBridge(); }, 250);
     };
 
     MCPPremiereBridge.prototype.addToQueue = function(command) {
@@ -813,6 +880,10 @@
 
     MCPPremiereBridge.prototype.saveConfig = function() {
         try {
+            var control = this.controlPath();
+            if (!fs.existsSync(control) || JSON.parse(fs.readFileSync(control, 'utf8')).enabled !== false) {
+                throw new Error('Pause the bridge before changing its directory');
+            }
             var tempEl = document.getElementById('tempDirectory');
             var tempDir = tempEl ? sanitizeTempDirectoryInput(tempEl.value) : '';
             if (tempDir) this.tempDirectory = tempDir;
@@ -849,34 +920,17 @@
         }
     };
 
-    MCPPremiereBridge.prototype.startBridge = function() {
-        if (this.isConnected) {
-            this.updateUI();
-            this.updateServerStatus(true);
-            return;
-        }
-        this.log('Starting MCP Bridge...', 'info');
-        this.isProcessing = false;
-        this.isConnected = true;
-        this.updateUI();
-        var tempPath = this.getTempDirectory();
-        if (!tempPath) {
-            this.isConnected = false;
-            this.updateUI();
-            this.updateServerStatus(false);
-            return;
-        }
-        this.log('Watching: ' + tempPath + ' (must match your MCP client PREMIERE_TEMP_DIR)', 'info');
-        this.updateServerStatus(true);
-        this.log('Bridge ready. Connect from Codex, Claude, or another MCP client using this same temp directory.', 'info');
+    MCPPremiereBridge.prototype.startBridge = function(resume) {
+        if (!this.getTempDirectory()) return;
+        if (resume !== false) this.setEnabled(true);
+        this.pollBridge();
+        this.log('Bridge enabled. One background or panel instance will process commands.', 'info');
     };
 
     MCPPremiereBridge.prototype.stopBridge = function() {
-        this.log('Stopping MCP Bridge...', 'info');
-        this.isConnected = false;
-        this.isProcessing = false;
-        this.updateUI();
-        this.updateServerStatus(false);
+        this.setEnabled(false);
+        this.pollBridge();
+        this.log('Bridge paused across panel and background instances. Any active native call must finish before ownership is released.', 'info');
     };
 
     MCPPremiereBridge.prototype.runDiagnostics = function() {
@@ -999,21 +1053,29 @@
     };
 
     MCPPremiereBridge.prototype.updateUI = function() {
+        var activeElsewhere = false;
+        if (!this.isConnected && this.tempDirectory) {
+            try {
+                var heartbeat = JSON.parse(fs.readFileSync(path.join(this.tempDirectory, 'bridge-heartbeat.json'), 'utf8'));
+                activeElsewhere = heartbeat.started === true && Date.now() - heartbeat.t >= 0 && Date.now() - heartbeat.t < 1500;
+            } catch (e) {}
+        }
+        this.updateServerStatus(this.isConnected || activeElsewhere);
         var connectionStatus = document.getElementById('connectionStatus');
         var connectionText = document.getElementById('connectionText');
         if (connectionStatus && connectionText) {
-            if (this.isConnected) {
+            if (this.isConnected || activeElsewhere) {
                 connectionStatus.className = 'status-dot connected';
-                connectionText.textContent = 'Connected';
+                connectionText.textContent = this.isConnected ? 'Connected' : 'Connected (background)';
             } else {
                 connectionStatus.className = 'status-dot disconnected';
-                connectionText.textContent = 'Disconnected';
+                connectionText.textContent = 'Paused or waiting for bridge ownership';
             }
         }
         var startBtn = document.getElementById('startButton');
         var stopBtn = document.getElementById('stopButton');
-        if (startBtn) startBtn.disabled = this.isConnected;
-        if (stopBtn) stopBtn.disabled = !this.isConnected;
+        if (startBtn) startBtn.disabled = this.isConnected || activeElsewhere;
+        if (stopBtn) stopBtn.disabled = false; // Also pauses the background owner.
         var tempEl = document.getElementById('tempDirectory');
         if (tempEl && !tempEl.value && this.getTempDirectory()) tempEl.value = this.getTempDirectory();
     };
@@ -1060,6 +1122,10 @@
     window.clearLog = function() { if (window.bridge) window.bridge.clearLog(); };
     window.copyUpdateCommand = function() { if (window.bridge) window.bridge.copyUpdateCommand(); };
     window.updateLater = function() { if (window.bridge) window.bridge.updateLater(); };
+    if (window.addEventListener) window.addEventListener('unload', function() {
+        var bridge = window.bridge;
+        if (bridge && bridge.owner && !bridge.evalScriptBusy && !bridge.isProcessing) bridge.owner.release();
+    });
     document.addEventListener('DOMContentLoaded', function() {
         window.bridge = new MCPPremiereBridge();
     });
